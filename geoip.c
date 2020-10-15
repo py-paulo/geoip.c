@@ -12,7 +12,7 @@ main(int argc, char *argv[])
     HTTP *http;
     IPADDR *addr;
 
-	int port, c, code;
+	int port, code;
     char *status, *method;
 
     if ( argc != 2 ) {
@@ -41,4 +41,10 @@ main(int argc, char *argv[])
     }
     http_request(http, uri);
 
+    http_response(http);
+
+    http_close(http);
+    url_free(uri);
+
+    return 0;
 }

@@ -12,7 +12,9 @@
 
 #include "http.h"
 
-
+/*
+ * Routines to manage HTTP connections
+ */
 typedef enum { ST_REQ, ST_HDRS, ST_BODY, ST_DONE } HTTP_STATE;
 
 struct http {
@@ -21,19 +23,17 @@ struct http {
     int code;			/* Response code */
     char version[4];	/* HTTP version from the response */
     char *response;		/* Response string with message */
+    int sock;           /* Socket connection */
 };
-
 
 /*
  * Open an HTTP connection for a specified IP address and port number
  */
-
 HTTP *
 http_open(URL *uri, IPADDR *addr, int port)
 {
 	HTTP *http;
 	struct sockaddr_in sa;
-	int sock;
 
 	if ( addr == NULL )
 		return NULL;
@@ -42,7 +42,7 @@ http_open(URL *uri, IPADDR *addr, int port)
 
 	bzero(http, sizeof(*http));
 
-	if ( ( sock = socket(AF_INET, SOCK_STREAM, 0) ) < 0 ) {
+	if ( ( http->sock = socket(AF_INET, SOCK_STREAM, 0) ) < 0 ) {
 		free(http);
 		return NULL;
 	}
@@ -54,51 +54,27 @@ http_open(URL *uri, IPADDR *addr, int port)
 
 	bcopy(addr, &sa.sin_addr.s_addr, sizeof(struct in_addr));
 
-	if ( ( connect(sock, (struct sockaddr *)(&sa), sizeof(sa) ) < 0 ) || 
-            (http->file = fdopen(sock, "w+")) == NULL) {
+	if ( connect(http->sock, (struct sockaddr *)(&sa), sizeof(sa) ) < 0 ) {
 		free(http);
-		close(sock);
+		close(http->sock);
 		return NULL;
 	}
-	
+
 	http->state = ST_REQ;
-    /*
-    * READ
-    */
-    /*
-    char buffer[1024];
-    char header_request[200];
-    if ( sprintf(header_request, "GET %s HTTP/1.0\r\nHost: %s\r\n\r\n",
-            url_path(uri), url_hostname(uri) ) == -1 ) {
-        return NULL;
-    }
-
-    write(sock, header_request, strlen (header_request)); // write(sock, char[], len);
-    bzero(buffer, 1024);
-    
-    while(read(sock, buffer, 1024 - 1) != 0){
-        fprintf(stderr, "%s", buffer);
-        bzero(buffer, 1024);
-    }
-
-    shutdown(sock, SHUT_RDWR); 
-    close(sock);
-    */
 
     return http;
-
 }
 
 /*
  * Close an HTTP connection that was previously opened.
  */
-
 int
 http_close(HTTP *http)
 {
     int err;
 
-    err = fclose(http->file);
+    shutdown(http->sock, SHUT_RDWR);
+    err = close(http->sock);
     free(http->response);
     // http_free_headers(http->headers);
     free(http);
@@ -110,7 +86,6 @@ http_close(HTTP *http)
  * Obtain the underlying FILE in an HTTP connection.
  * This can be used to issue additional headers after the request.
  */
-
 FILE *
 http_file(HTTP *http)
 {
@@ -123,31 +98,83 @@ http_file(HTTP *http)
  * headers, if desired, then must call http_response() before
  * attempting to read any document returned on the connection.
  */
-
 int http_request(HTTP *http, URL *uri)
 {
     void *prev;
+    char header_request[200];
 
     if ( http->state != ST_REQ )
         return 1;
+
     /* Ignore SIGPIPE so we don't die while doing this */
     prev = signal(SIGPIPE, SIG_IGN);
-    if ( fprintf(http->file, "GET %s HTTP/1.0\r\nHost: %s\r\n\r\n",
+    if ( sprintf(header_request, "GET %s HTTP/1.0\r\nHost: %s\r\n\r\n",
             url_path(uri), url_hostname(uri) ) == -1) {
         signal(SIGPIPE, prev);
         return 1;
     }
+
+    write(http->sock, header_request, strlen (header_request));
     http->state = ST_HDRS;
     signal(SIGPIPE, prev);
 
     return 0;
 }
 
+/*
+ * Finish outputting an HTTP request and read the reply
+ * headers from the response.  After calling this, http_getc()
+ * may be used to collect any document returned as part of the
+ * response.
+ */
+int
+http_response(HTTP *http)
+{
+    char buffer[1024];
+
+    /*
+    if ( sprintf(http->sock, "\r\n" ) == -1 ) {
+        return 1;
+    }
+    */
+    bzero(buffer, 1024);
+    
+    while ( read(http->sock, buffer, 1024 - 1) != 0 ) {
+        fprintf(stderr, "%s", buffer);
+        bzero(buffer, 1024);
+    }
+    return 0;
+}
+
+/*
+ * Retrieve the HTTP status line and code returned as the
+ * first line of the response from the server
+ */
+char *
+http_status(HTTP *http, int *code)
+{
+    if ( http->state != ST_BODY )
+        return NULL;
+    if ( code != NULL )
+        *code = http->code;
+    return http->response;
+}
+
+/*
+ * Read the next character of a document from an HTTP connection
+ */
+int
+http_getc(HTTP *http)
+{
+    if ( http->state != ST_BODY )
+        return EOF;
+    return fgetc(http->file);
+}
+
 
 /*
  * Routines to interpret and manage URL's
  */
-
 struct url {
     char *stuff;			/* Working storage containing all parts */
     char *method;			/* The access method (http, ftp, etc.) */
@@ -162,7 +189,6 @@ struct url {
  * Parse a URL given as a string into its constituent parts,
  * and return it as a URL object.
  */
-
 URL *
 url_parse(char *url)
 {
@@ -245,7 +271,6 @@ url_parse(char *url)
 /*
  * Free a URL object that was previously created by url_parse()
  */
-
 void
 url_free(URL *up)
 {
@@ -258,7 +283,6 @@ url_free(URL *up)
 /*
  * Extract the "access method" portion of a URL
  */
-
 char *
 url_method(URL *up)
 {
@@ -268,7 +292,6 @@ url_method(URL *up)
 /*
  * Extract the hostname portion of a URL
  */
-
 char *
 url_hostname(URL *up)
 {
@@ -278,7 +301,6 @@ url_hostname(URL *up)
 /*
  * Obtain the TCP port number portion of a URL
  */
-
 int
 url_port(URL *up)
 {
@@ -288,7 +310,6 @@ url_port(URL *up)
 /*
  * Obtain the path portion of a URL
  */
-
 char *
 url_path(URL *up)
 {
@@ -300,7 +321,6 @@ url_path(URL *up)
  * This will cause a DNS lookup if the address is not already cached
  * in the URL object.
  */
-
 IPADDR *
 url_address(URL *up)
 {
@@ -320,7 +340,6 @@ url_address(URL *up)
 /*
  * Print out the components of a parsed URL, for debugging purposes
  */
-
 void
 url_print(FILE *f, URL *uri)
 {
@@ -331,4 +350,3 @@ url_print(FILE *f, URL *uri)
 	    uri->dnsdone ? inet_ntoa(uri->addr) : "?.?.?.?",
 	    uri->port, uri->path);
 }
-
